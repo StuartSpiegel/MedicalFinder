@@ -1,0 +1,12 @@
+services:
+  doctor-webapp:
+    build: .
+    container_name: doctor-webapp
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      # Persist server-side run outputs to your local machine
+      - ./data:/app/data
+    restart: unless-stopped

@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Doctor Finder</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+    label { display: block; font-size: 12px; opacity: 0.8; margin-bottom: 4px; }
+    input, select { padding: 8px; min-width: 160px; }
+    button { padding: 10px 14px; cursor: pointer; }
+    .status { margin-top: 12px; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f6f6f6; }
+    .muted { opacity: 0.75; }
+    .actions { display:flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+    .tiny { font-size: 12px; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <h1>Doctor Finder</h1>
+  <p class="muted">
+    Multi-search mode: grid coverage + multiple medical types, with deduplication.
+    You can collect far more than 20 unique results per run.
+  </p>
+
+  <div class="row">
+    <div>
+      <label>Latitude</label>
+      <input id="lat" type="number" step="any" placeholder="e.g. 40.7128">
+    </div>
+    <div>
+      <label>Longitude</label>
+      <input id="lng" type="number" step="any" placeholder="e.g. -74.0060">
+    </div>
+    <div>
+      <label>Radius (miles)</label>
+      <input id="miles" type="number" step="any" value="5">
+    </div>
+
+    <div>
+      <label>Coverage</label>
+      <select id="coverage">
+        <option value="quick">Quick (few calls)</option>
+        <option value="standard" selected>Standard</option>
+        <option value="extensive">Extensive (many calls)</option>
+      </select>
+      <div class="tiny">More coverage = more API calls/cost</div>
+    </div>
+
+    <div>
+      <label>Include clinics/hospitals</label>
+      <input id="include_extra_types" type="checkbox" checked>
+    </div>
+
+    <div>
+      <label>Per-request max (1–20)</label>
+      <input id="max_results" type="number" min="1" max="20" value="20">
+      <div class="tiny">Each search call returns up to 20</div>
+    </div>
+
+    <div>
+      <label>Hard cap total uniques</label>
+      <input id="hard_cap_unique" type="number" min="20" max="1000" value="300">
+      <div class="tiny">Safety limit per run</div>
+    </div>
+
+    <div>
+      <label>Persistence (server txt)</label>
+      <input id="persist" type="checkbox" checked>
+    </div>
+
+    <button id="btnLocate">Use my current location</button>
+    <button id="btnSearch">Search</button>
+  </div>
+
+  <div class="actions">
+    <button id="btnCsv" disabled>Download CSV</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <table id="resultsTable" style="display:none;">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Address</th>
+        <th>Phone</th>
+        <th>Website</th>
+      </tr>
+    </thead>
+    <tbody id="resultsBody"></tbody>
+  </table>
+
+<script>
+  let lastRows = [];
+
+  function setStatus(msg) {
+    document.getElementById("status").textContent = msg || "";
+  }
+
+  function setRows(rows) {
+    lastRows = rows || [];
+    const table = document.getElementById("resultsTable");
+    const body = document.getElementById("resultsBody");
+    body.innerHTML = "";
+
+    if (!lastRows.length) {
+      table.style.display = "none";
+      document.getElementById("btnCsv").disabled = true;
+      return;
+    }
+
+    for (const r of lastRows) {
+      const tr = document.createElement("tr");
+
+      const tdName = document.createElement("td");
+      tdName.textContent = r.name || "";
+      tr.appendChild(tdName);
+
+      const tdAddr = document.createElement("td");
+      tdAddr.textContent = r.address || "";
+      tr.appendChild(tdAddr);
+
+      const tdPhone = document.createElement("td");
+      tdPhone.textContent = r.phone || "";
+      tr.appendChild(tdPhone);
+
+      const tdWeb = document.createElement("td");
+      if (r.website) {
+        const a = document.createElement("a");
+        a.href = r.website;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = r.website;
+        tdWeb.appendChild(a);
+      } else {
+        tdWeb.textContent = "";
+      }
+      tr.appendChild(tdWeb);
+
+      body.appendChild(tr);
+    }
+
+    table.style.display = "";
+    document.getElementById("btnCsv").disabled = false;
+  }
+
+  document.getElementById("btnLocate").addEventListener("click", () => {
+    setStatus("Requesting location permission…");
+    if (!navigator.geolocation) {
+      setStatus("Geolocation is not supported in this browser.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        document.getElementById("lat").value = pos.coords.latitude;
+        document.getElementById("lng").value = pos.coords.longitude;
+        setStatus("Location set. Now click Search.");
+      },
+      (err) => {
+        setStatus("Failed to get location: " + err.message);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+
+  document.getElementById("btnSearch").addEventListener("click", async () => {
+    const lat = parseFloat(document.getElementById("lat").value);
+    const lng = parseFloat(document.getElementById("lng").value);
+    const miles = parseFloat(document.getElementById("miles").value || "5");
+    const max_results = parseInt(document.getElementById("max_results").value || "20", 10);
+    const persist = document.getElementById("persist").checked;
+    const coverage = document.getElementById("coverage").value;
+    const include_extra_types = document.getElementById("include_extra_types").checked;
+    const hard_cap_unique = parseInt(document.getElementById("hard_cap_unique").value || "300", 10);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      setStatus("Please set a valid latitude and longitude (or click 'Use my current location').");
+      return;
+    }
+
+    setStatus("Searching (multi-pass)…");
+    setRows([]);
+
+    const resp = await fetch("/api/search", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({lat, lng, miles, max_results, persist, coverage, include_extra_types, hard_cap_unique})
+    });
+
+    const data = await resp.json().catch(() => null);
+    if (!data || !data.ok) {
+      setStatus("Error: " + (data?.error || "Unknown error") + (data?.details ? ("\n\n" + data.details) : ""));
+      return;
+    }
+
+    const m = data.meta || {};
+    setStatus(
+      `Found ${data.rows.length} unique results.\n` +
+      `Coverage: ${m.coverage} | Grid points: ${m.grid_points} | Types: ${(m.types || []).join(", ")}\n` +
+      `API calls: nearby=${m.nearby_calls}, details=${m.details_calls}\n` +
+      (data.persisted_path ? `Saved server text file: ${data.persisted_path}\n` : "")
+    );
+
+    setRows(data.rows);
+  });
+
+  document.getElementById("btnCsv").addEventListener("click", async () => {
+    if (!lastRows.length) return;
+
+    const resp = await fetch("/api/export.csv", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({rows: lastRows})
+    });
+
+    if (!resp.ok) {
+      setStatus("CSV export failed.");
+      return;
+    }
+
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "doctors.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(url);
+  });
+</script>
+
+</body>
+</html>
